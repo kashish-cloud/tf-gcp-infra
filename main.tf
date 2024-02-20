@@ -9,7 +9,7 @@ resource "google_compute_network" "my_vpc" {
   auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
   delete_default_routes_on_create = true
-}
+
 
 resource "google_compute_subnetwork" "webapp_subnet" {
   name          = "webapp-subnet"

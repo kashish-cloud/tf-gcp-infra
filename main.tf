@@ -41,6 +41,9 @@ resource "google_compute_firewall" "app_firewall" {
     protocol = "tcp"
     ports    = [8080]
   }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["webapp"]
 }
 
 resource "google_compute_instance" "app_instance" {
@@ -56,5 +59,6 @@ resource "google_compute_instance" "app_instance" {
 
   network_interface {
     network = google_compute_network.my_vpc.self_link
+    subnetwork = google_compute_subnetwork.webapp_subnet.self_link
   }
 }

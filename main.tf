@@ -32,3 +32,29 @@ resource "google_compute_route" "route_webapp_subnet" {
 
   depends_on = [google_compute_network.my_vpc]
 }
+
+resource "google_compute_firewall" "app_firewall" {
+  name    = "app-firewall"
+  network = google_compute_network.my_vpc.self_link
+
+  allow {
+    protocol = "tcp"
+    ports    = [8080]
+  }
+}
+
+resource "google_compute_instance" "app_instance" {
+  name         = "app-instance"
+  machine_type = "n1-standard-1"
+  zone         = "us-east1-b"
+
+  boot_disk {
+    initialize_params {
+      image = "projects/tf-gcp-infra-project/global/images/custom-app-image"
+    }
+  }
+
+  network_interface {
+    network = google_compute_network.my_vpc.self_link
+  }
+}

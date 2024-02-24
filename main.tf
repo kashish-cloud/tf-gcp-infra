@@ -46,6 +46,19 @@ resource "google_compute_firewall" "app_firewall" {
   target_tags   = ["webapp"]
 }
 
+resource "google_compute_disk" "app_disk" {
+  name  = "app-disk"
+  size  = 100
+  type  = "pd-standard"
+  zone  = "us-east1-b"  # Replace with your desired zone
+}
+
+resource "google_compute_image" "custom_app_image" {
+  name         = "custom-app-image"
+  source_disk  = google_compute_disk.app_disk.id
+  project      = "tf-gcp-infra-project"
+}
+
 resource "google_compute_instance" "app_instance" {
   name         = "app-instance"
   machine_type = "n1-standard-1"
@@ -53,7 +66,7 @@ resource "google_compute_instance" "app_instance" {
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/custom-app-image"
+      image = google_compute_image.custom_app_image.self_link
     }
   }
 

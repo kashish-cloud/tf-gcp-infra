@@ -4,11 +4,30 @@ provider "google" {
   region      = "us-east1"
 }
 
+resource "google_project_service" "servicenetworking" {
+  project = "tf-gcp-infra-project"
+  service = "servicenetworking.googleapis.com"
+}
+
+resource "google_service_networking_connection" "private_connection" {
+  network                 = google_compute_network.my_vpc.self_link
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = ["10.2.0.0/16"]
+}
+
+resource "google_project_iam_member" "add_peering_permission" {
+  project = "tf-gcp-infra-project"
+  role    = "roles/servicenetworking.servicesAdmin"
+  member  = "serviceAccount:912452358996-compute@developer.gserviceaccount.com"
+}
+
 resource "google_compute_network" "my_vpc" {
   name                            = "my-vpc"
   auto_create_subnetworks         = false
   routing_mode                    = "REGIONAL"
   delete_default_routes_on_create = true
+
+  depends_on = [google_project_service.servicenetworking]
 }
 
 resource "google_compute_subnetwork" "webapp_subnet" {
@@ -46,6 +65,20 @@ resource "google_compute_firewall" "app_firewall" {
   target_tags   = ["app"]
 }
 
+resource "google_compute_firewall" "db_firewall" {
+  name    = "db-firewall"
+  network = google_compute_network.my_vpc.self_link
+
+  allow {
+    protocol = "tcp"
+    ports    = [5432]
+  }
+
+  source_tags   = ["app"]
+  target_tags   = ["db"]
+  source_ranges = [google_compute_instance.app_instance.network_interface.0.access_config[0].nat_ip]
+}
+
 resource "google_compute_disk" "app_disk" {
   name = "app-disk"
   size = 100
@@ -53,11 +86,44 @@ resource "google_compute_disk" "app_disk" {
   zone = "us-east1-b"
 }
 
-/*resource "google_compute_image" "custom_app_image" {
-  name        = "packer-1708816833"
-  source_disk = google_compute_disk.app_disk.id
-  project     = "tf-gcp-infra-project"
-}*/
+# CloudSQL Instance
+resource "google_sql_database_instance" "cloudsql_instance" {
+  name             = "webapp-db-instance"
+  database_version = "POSTGRES_13"
+  project          = "tf-gcp-infra-project"
+  region           = "us-east1"
+
+  settings {
+    tier              = "db-f1-micro"
+    activation_policy = "ALWAYS"
+    disk_type         = "pd-ssd"
+    disk_size         = 100
+
+    # Link to custom VPC and subnet
+    ip_configuration {
+      ipv4_enabled    = false
+      private_network = google_compute_network.my_vpc.self_link
+    }
+  }
+}
+
+# CloudSQL Database
+resource "google_sql_database" "cloudsql_database" {
+  name     = "webapp"
+  instance = google_sql_database_instance.cloudsql_instance.name
+}
+
+# CloudSQL Database User
+resource "random_password" "database_password" {
+  length  = 16
+  special = true
+}
+
+resource "google_sql_user" "cloudsql_user" {
+  name     = "webapp"
+  instance = google_sql_database_instance.cloudsql_instance.name
+  password = random_password.database_password.result
+}
 
 resource "google_compute_instance" "app_instance" {
   name         = "app-instance"
@@ -67,7 +133,7 @@ resource "google_compute_instance" "app_instance" {
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1709001176"
+      image = "projects/tf-gcp-infra-project/global/images/packer-1709082053"
       size  = "100"
       type  = "pd-balanced"
     }
@@ -80,4 +146,15 @@ resource "google_compute_instance" "app_instance" {
 
     }
   }
+
+  metadata_startup_script = <<-EOF
+    #!/bin/bash
+    # Startup script to configure database connection for web application
+    echo "DB_HOST=${google_sql_database_instance.cloudsql_instance.ip_address}" >> /etc/environment
+    echo "DB_PORT=5432" >> /etc/environment
+    echo "DB_NAME=${google_sql_database.cloudsql_database.name}" >> /etc/environment
+    echo "DB_USER=${google_sql_user.cloudsql_user.name}" >> /etc/environment
+    echo "DB_PASSWORD=${random_password.database_password.result}" >> /etc/environment
+    systemctl start kas.service
+  EOF
 }

@@ -9,12 +9,6 @@ resource "google_project_service" "servicenetworking" {
   service = "servicenetworking.googleapis.com"
 }
 
-/*resource "google_project_iam_member" "add_peering_permission" {
-  project = "tf-gcp-infra-project"
-  role    = "roles/servicenetworking.servicesAdmin"
-  member  = "serviceAccount:912452358996-compute@developer.gserviceaccount.com"
-}*/
-
 resource "google_compute_network" "my_vpc" {
   name                            = "my-vpc"
   auto_create_subnetworks         = false
@@ -74,20 +68,6 @@ resource "google_compute_firewall" "app_firewall" {
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["app"]
 }
-
-/*resource "google_compute_firewall" "db_firewall" {
-  name    = "db-firewall"
-  network = google_compute_network.my_vpc.self_link
-
-  allow {
-    protocol = "tcp"
-    ports    = [5432]
-  }
-
-  source_tags   = ["app"]
-  target_tags   = ["db"]
-  source_ranges = [google_compute_instance.app_instance.network_interface.0.access_config[0].nat_ip]
-}*/
 
 resource "google_compute_disk" "app_disk" {
   name = "app-disk"

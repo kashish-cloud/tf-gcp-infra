@@ -73,7 +73,7 @@ resource "google_compute_disk" "app_disk" {
   name = "app-disk"
   size = 100
   type = "pd-standard"
-  zone = "us-east1-b"
+  zone = "us-east1-c"
 }
 
 # CloudSQL Instance
@@ -121,12 +121,12 @@ resource "google_sql_user" "cloudsql_user" {
 resource "google_compute_instance" "app_instance" {
   name         = "app-instance"
   machine_type = "n1-standard-1"
-  zone         = "us-east1-b"
+  zone         = "us-east1-c"
   tags         = ["app"]
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1709431081"
+      image = "projects/tf-gcp-infra-project/global/images/packer-1710280543"
       size  = "100"
       type  = "pd-balanced"
     }

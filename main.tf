@@ -9,17 +9,11 @@ resource "google_project_service" "servicenetworking" {
   service = "servicenetworking.googleapis.com"
 }
 
-resource "google_service_networking_connection" "private_connection" {
-  network                 = google_compute_network.my_vpc.self_link
-  service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = ["10.2.0.0/16"]
-}
-
-resource "google_project_iam_member" "add_peering_permission" {
+/*resource "google_project_iam_member" "add_peering_permission" {
   project = "tf-gcp-infra-project"
   role    = "roles/servicenetworking.servicesAdmin"
   member  = "serviceAccount:912452358996-compute@developer.gserviceaccount.com"
-}
+}*/
 
 resource "google_compute_network" "my_vpc" {
   name                            = "my-vpc"
@@ -52,6 +46,22 @@ resource "google_compute_route" "route_webapp_subnet" {
   depends_on = [google_compute_network.my_vpc]
 }
 
+resource "google_compute_global_address" "private_service_ip_range" {
+  name          = "private-service-ip-range"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  network       = google_compute_network.my_vpc.self_link
+  prefix_length = 24
+  depends_on    = [google_compute_network.my_vpc]
+}
+
+resource "google_service_networking_connection" "private_connection" {
+  network                 = google_compute_network.my_vpc.self_link
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_service_ip_range.name]
+  depends_on              = [google_compute_network.my_vpc]
+}
+
 resource "google_compute_firewall" "app_firewall" {
   name    = "app-firewall"
   network = google_compute_network.my_vpc.self_link
@@ -65,7 +75,7 @@ resource "google_compute_firewall" "app_firewall" {
   target_tags   = ["app"]
 }
 
-resource "google_compute_firewall" "db_firewall" {
+/*resource "google_compute_firewall" "db_firewall" {
   name    = "db-firewall"
   network = google_compute_network.my_vpc.self_link
 
@@ -77,7 +87,7 @@ resource "google_compute_firewall" "db_firewall" {
   source_tags   = ["app"]
   target_tags   = ["db"]
   source_ranges = [google_compute_instance.app_instance.network_interface.0.access_config[0].nat_ip]
-}
+}*/
 
 resource "google_compute_disk" "app_disk" {
   name = "app-disk"
@@ -93,6 +103,8 @@ resource "google_sql_database_instance" "cloudsql_instance" {
   project          = "tf-gcp-infra-project"
   region           = "us-east1"
 
+  depends_on = [google_service_networking_connection.private_connection]
+
   settings {
     tier              = "db-f1-micro"
     activation_policy = "ALWAYS"
@@ -105,6 +117,7 @@ resource "google_sql_database_instance" "cloudsql_instance" {
       private_network = google_compute_network.my_vpc.self_link
     }
   }
+  deletion_protection = false
 }
 
 # CloudSQL Database
@@ -133,7 +146,7 @@ resource "google_compute_instance" "app_instance" {
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1709082053"
+      image = "projects/tf-gcp-infra-project/global/images/packer-1709431081"
       size  = "100"
       type  = "pd-balanced"
     }
@@ -150,11 +163,11 @@ resource "google_compute_instance" "app_instance" {
   metadata_startup_script = <<-EOF
     #!/bin/bash
     # Startup script to configure database connection for web application
-    echo "DB_HOST=${google_sql_database_instance.cloudsql_instance.ip_address}" >> /etc/environment
-    echo "DB_PORT=5432" >> /etc/environment
-    echo "DB_NAME=${google_sql_database.cloudsql_database.name}" >> /etc/environment
-    echo "DB_USER=${google_sql_user.cloudsql_user.name}" >> /etc/environment
-    echo "DB_PASSWORD=${random_password.database_password.result}" >> /etc/environment
+    echo "HOST=${google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address}" > /opt/webapp/.env
+    echo "DBPORT=5432" >> /opt/webapp/.env
+    echo "DBNAME=${google_sql_database.cloudsql_database.name}" >> /opt/webapp/.env
+    echo "DBUSER=${google_sql_user.cloudsql_user.name}" >> /opt/webapp/.env
+    echo "DBPASSWORD=${random_password.database_password.result}" >> /opt/webapp/.env
     systemctl start kas.service
   EOF
 }

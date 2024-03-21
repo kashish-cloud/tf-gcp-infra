@@ -118,6 +118,30 @@ resource "google_sql_user" "cloudsql_user" {
   password = random_password.database_password.result
 }
 
+resource "google_service_account" "ops_agent_service_account" {
+  account_id   = "ops-agent-service-account"
+  display_name = "Ops Agent Service Account"
+  project      = "tf-gcp-infra-project"
+}
+
+resource "google_project_iam_binding" "ops_agent_logging_binding" {
+  project = "tf-gcp-infra-project"
+  role    = "roles/logging.admin"
+
+  members = [
+    "serviceAccount:${google_service_account.ops_agent_service_account.email}"
+  ]
+}
+
+resource "google_project_iam_binding" "ops_agent_monitoring_binding" {
+  project = "tf-gcp-infra-project"
+  role    = "roles/monitoring.metricWriter"
+
+  members = [
+    "serviceAccount:${google_service_account.ops_agent_service_account.email}"
+  ]
+}
+
 resource "google_compute_instance" "app_instance" {
   name         = "app-instance"
   machine_type = "n1-standard-1"
@@ -126,7 +150,7 @@ resource "google_compute_instance" "app_instance" {
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1710280543"
+      image = "projects/tf-gcp-infra-project/global/images/packer-1711060281"
       size  = "100"
       type  = "pd-balanced"
     }
@@ -140,6 +164,11 @@ resource "google_compute_instance" "app_instance" {
     }
   }
 
+  service_account {
+    email  = google_service_account.ops_agent_service_account.email
+    scopes = ["https://www.googleapis.com/auth/logging.admin", "https://www.googleapis.com/auth/cloud-platform"]
+  }
+
   metadata_startup_script = <<-EOF
     #!/bin/bash
     # Startup script to configure database connection for web application
@@ -150,4 +179,15 @@ resource "google_compute_instance" "app_instance" {
     echo "DBPASSWORD=${random_password.database_password.result}" >> /opt/webapp/.env
     systemctl start kas.service
   EOF
+}
+
+resource "google_dns_record_set" "example" {
+  name         = "kashishdesai.me."
+  type         = "A"
+  ttl          = 300
+  managed_zone = "kashishdesai"
+
+  rrdatas = [
+    google_compute_instance.app_instance.network_interface.0.access_config.0.nat_ip,
+  ]
 }

@@ -142,6 +142,15 @@ resource "google_project_iam_binding" "ops_agent_monitoring_binding" {
   ]
 }
 
+resource "google_project_iam_binding" "ops_agent_pubsub_publisher_binding" {
+  project = "tf-gcp-infra-project"
+  role    = "roles/pubsub.publisher"
+
+  members = [
+    "serviceAccount:${google_service_account.ops_agent_service_account.email}"
+  ]
+}
+
 # Creating a new service account for Pub/Sub
 resource "google_service_account" "pubsub_service_account" {
   account_id   = "pubsub-service-account"
@@ -166,7 +175,7 @@ resource "google_compute_instance" "app_instance" {
 
   boot_disk {
     initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1711657940"
+      image = "projects/tf-gcp-infra-project/global/images/packer-1712122661"
       size  = "100"
       type  = "pd-balanced"
     }
@@ -182,17 +191,17 @@ resource "google_compute_instance" "app_instance" {
 
   service_account {
     email  = google_service_account.ops_agent_service_account.email
-    scopes = ["https://www.googleapis.com/auth/logging.admin", "https://www.googleapis.com/auth/cloud-platform"]
+    scopes = ["https://www.googleapis.com/auth/logging.admin", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/pubsub"]
   }
 
   metadata_startup_script = <<-EOF
     #!/bin/bash
     # Startup script to configure database connection for web application
-    echo "HOST=${google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address}" > /opt/webapp/.env
+    echo "HOST='${google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address}'" > /opt/webapp/.env
     echo "DBPORT=5432" >> /opt/webapp/.env
-    echo "DBNAME=${google_sql_database.cloudsql_database.name}" >> /opt/webapp/.env
-    echo "DBUSER=${google_sql_user.cloudsql_user.name}" >> /opt/webapp/.env
-    echo "DBPASSWORD=${random_password.database_password.result}" >> /opt/webapp/.env
+    echo "DBNAME='${google_sql_database.cloudsql_database.name}'" >> /opt/webapp/.env
+    echo "DBUSER='${google_sql_user.cloudsql_user.name}'" >> /opt/webapp/.env
+    echo "DBPASSWORD='${random_password.database_password.result}'" >> /opt/webapp/.env
     systemctl start kas.service
     EOF
 }
@@ -253,11 +262,11 @@ resource "google_storage_bucket" "serverless_bucket" {
   uniform_bucket_level_access = true
 }
 
-/*data "archive_file" "serverless_code" {
+data "archive_file" "serverless_code" {
   type        = "zip"
-  output_path = "/tmp/serverless.zip"
-  source_dir  = "./serverless"
-}*/
+  output_path = "${path.module}/serverless.zip"
+  source_dir  = "${path.module}/serverless"
+}
 
 resource "google_storage_bucket_object" "serverless_code" {
   name   = "serverless.zip"
@@ -265,10 +274,19 @@ resource "google_storage_bucket_object" "serverless_code" {
   source = "serverless.zip"
 }
 
-resource "google_service_networking_connection" "vpc_connector" {
+/*resource "google_service_networking_connection" "vpc_connector" {
   network                 = google_compute_network.my_vpc.self_link
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_service_ip_range.name]
+}*/
+
+resource "google_vpc_access_connector" "serverless_vpc_connector" {
+  name          = "my-vpc-connector"
+  region        = "us-east1"
+  network       = google_compute_network.my_vpc.self_link
+  ip_cidr_range = "10.0.0.0/28"
+
+  depends_on = [google_compute_network.my_vpc]
 }
 
 // Deploy Cloud Function
@@ -302,7 +320,7 @@ resource "google_cloudfunctions2_function" "cloud_function" {
     }
     ingress_settings               = "ALLOW_INTERNAL_ONLY"
     all_traffic_on_latest_revision = true
-    vpc_connector                  = google_service_networking_connection.vpc_connector.id
+    vpc_connector                  = google_vpc_access_connector.serverless_vpc_connector.id
     service_account_email          = google_service_account.pubsub_service_account.email
   }
 
@@ -310,6 +328,6 @@ resource "google_cloudfunctions2_function" "cloud_function" {
     trigger_region = "us-east1"
     event_type     = "google.cloud.pubsub.topic.v1.messagePublished"
     pubsub_topic   = google_pubsub_topic.verify_email.id
-    retry_policy   = "RETRY_POLICY_RETRY"
+    retry_policy   = "RETRY_POLICY_DO_NOT_RETRY"
   }
 }

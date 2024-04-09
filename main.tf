@@ -66,7 +66,7 @@ resource "google_compute_firewall" "app_firewall" {
   }
 
   # Restricting traffic to only come from the load balancer's health check IP range
-  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["app", "my-vpc-webapp-subnet", "allow-health-check", "load-balancer-backend"]
 }
 

@@ -62,11 +62,12 @@ resource "google_compute_firewall" "app_firewall" {
 
   allow {
     protocol = "tcp"
-    ports    = [8080, 22]
+    ports    = [8080, 80]
   }
 
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["app"]
+  # Restricting traffic to only come from the load balancer's health check IP range
+  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = ["app", "my-vpc-webapp-subnet", "allow-health-check", "load-balancer-backend"]
 }
 
 resource "google_compute_disk" "app_disk" {
@@ -167,26 +168,49 @@ resource "google_project_iam_binding" "pubsub_publisher_binding" {
   ]
 }
 
-resource "google_compute_instance" "app_instance" {
-  name         = "app-instance"
-  machine_type = "n1-standard-1"
-  zone         = "us-east1-c"
-  tags         = ["app"]
-
-  boot_disk {
-    initialize_params {
-      image = "projects/tf-gcp-infra-project/global/images/packer-1712122661"
-      size  = "100"
-      type  = "pd-balanced"
+resource "google_compute_resource_policy" "daily_backup" {
+  name   = "every-day-4am"
+  region = "us-east1"
+  snapshot_schedule_policy {
+    schedule {
+      daily_schedule {
+        days_in_cycle = 1
+        start_time    = "04:00"
+      }
     }
+  }
+}
+
+resource "google_compute_region_instance_template" "webapp_template" {
+  name        = "webapp-template"
+  description = "Instance template for the web application"
+
+  tags = ["webapp", "my-vpc-webapp-subnet", "allow-health-check", "load-balancer-backend", "http-server", "http"]
+
+  labels = {
+    environment = "production"
+  }
+
+  machine_type   = "n1-standard-1"
+  can_ip_forward = false
+
+  scheduling {
+    automatic_restart   = true
+    on_host_maintenance = "MIGRATE"
+  }
+
+  // Create a new boot disk from an image
+  disk {
+    source_image = "projects/tf-gcp-infra-project/global/images/packer-1712181702"
+    auto_delete  = true
+    boot         = true
+    // Backup the disk every day
+    resource_policies = [google_compute_resource_policy.daily_backup.id]
   }
 
   network_interface {
     network    = google_compute_network.my_vpc.self_link
     subnetwork = google_compute_subnetwork.webapp_subnet.self_link
-    access_config {
-
-    }
   }
 
   service_account {
@@ -213,7 +237,7 @@ resource "google_dns_record_set" "example" {
   managed_zone = "kashishdesai"
 
   rrdatas = [
-    google_compute_instance.app_instance.network_interface.0.access_config.0.nat_ip,
+    module.gce-lb-http.external_ip
   ]
 }
 
@@ -274,12 +298,6 @@ resource "google_storage_bucket_object" "serverless_code" {
   source = "serverless.zip"
 }
 
-/*resource "google_service_networking_connection" "vpc_connector" {
-  network                 = google_compute_network.my_vpc.self_link
-  service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = [google_compute_global_address.private_service_ip_range.name]
-}*/
-
 resource "google_vpc_access_connector" "serverless_vpc_connector" {
   name          = "my-vpc-connector"
   region        = "us-east1"
@@ -330,4 +348,109 @@ resource "google_cloudfunctions2_function" "cloud_function" {
     pubsub_topic   = google_pubsub_topic.verify_email.id
     retry_policy   = "RETRY_POLICY_DO_NOT_RETRY"
   }
+}
+
+resource "google_compute_region_autoscaler" "my_autoscaler" {
+  name   = "my-region-autoscaler"
+  region = "us-east1"
+  target = google_compute_region_instance_group_manager.my_instance_group_manager.id
+
+  autoscaling_policy {
+    max_replicas    = 5
+    min_replicas    = 1
+    cooldown_period = 60
+
+    cpu_utilization {
+      target = 0.05
+    }
+  }
+}
+
+resource "google_compute_region_instance_group_manager" "my_instance_group_manager" {
+  name = "my-instance-group-manager"
+
+  base_instance_name        = "my-instance"
+  region                    = "us-east1"
+  distribution_policy_zones = ["us-east1-c", "us-east1-d"]
+
+  version {
+    instance_template = google_compute_region_instance_template.webapp_template.self_link
+  }
+
+  target_size = 2
+
+  /*auto_healing_policies {
+    //health_check      = google_compute_health_check.webapp_health_check.id
+    initial_delay_sec = 300
+  }*/
+
+  named_port {
+    name = "http"
+    port = 8080
+  }
+}
+
+resource "google_compute_managed_ssl_certificate" "my_ssl_certificate" {
+  name = "my-ssl-certificate"
+  managed {
+    domains = ["kashishdesai.me"]
+  }
+}
+
+# Defining the SSL policy
+resource "google_compute_ssl_policy" "my_ssl_policy" {
+  name    = "my-ssl-policy"
+  profile = "MODERN"
+}
+
+module "gce-lb-http" {
+  source  = "terraform-google-modules/lb-http/google"
+  version = "~> 10.0"
+  name    = "my-load-balancer"
+  project = "tf-gcp-infra-project"
+
+  target_tags = [
+    "webapp",
+    "my-vpc-webapp-subnet",
+    "allow-health-check",
+    "load-balancer-backend",
+    "http-server",
+    "http"
+  ]
+  firewall_networks = [
+    google_compute_network.my_vpc.name,
+  ]
+
+  backends = {
+    default = {
+      protocol    = "HTTPS"
+      port        = 8080
+      port_name   = "http"
+      timeout_sec = 30
+      enable_cdn  = false
+
+      health_check = {
+        request_path = "/healthz"
+        port         = 8080
+      }
+
+      log_config = {
+        enable      = true
+        sample_rate = 1.0
+      }
+
+      groups = [
+        {
+          group = google_compute_region_instance_group_manager.my_instance_group_manager.instance_group
+        },
+      ]
+
+      iap_config = {
+        enable = false
+      }
+    }
+  }
+
+  ssl                             = true
+  managed_ssl_certificate_domains = ["kashishdesai.me."]
 }

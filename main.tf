@@ -366,6 +366,22 @@ resource "google_compute_region_autoscaler" "my_autoscaler" {
   }
 }
 
+resource "google_compute_health_check" "webapp_health_check" {
+  name        = "webapp-health-check"
+  description = "Health check for the web application"
+
+  timeout_sec         = 1
+  check_interval_sec  = 1
+  healthy_threshold   = 4
+  unhealthy_threshold = 5
+
+  http_health_check {
+    port         = "8080"
+    request_path = "/healthz"
+    proxy_header = "NONE"
+  }
+}
+
 resource "google_compute_region_instance_group_manager" "my_instance_group_manager" {
   name = "my-instance-group-manager"
 
@@ -379,10 +395,10 @@ resource "google_compute_region_instance_group_manager" "my_instance_group_manag
 
   target_size = 2
 
-  /*auto_healing_policies {
-    //health_check      = google_compute_health_check.webapp_health_check.id
+  auto_healing_policies {
+    health_check      = google_compute_health_check.webapp_health_check.id
     initial_delay_sec = 300
-  }*/
+  }
 
   named_port {
     name = "http"

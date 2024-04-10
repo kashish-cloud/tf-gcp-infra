@@ -370,7 +370,7 @@ resource "google_compute_health_check" "webapp_health_check" {
   name        = "webapp-health-check"
   description = "Health check for the web application"
 
-  timeout_sec         = 1
+  timeout_sec         = 60
   check_interval_sec  = 1
   healthy_threshold   = 4
   unhealthy_threshold = 5

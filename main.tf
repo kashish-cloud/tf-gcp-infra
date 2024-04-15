@@ -62,12 +62,12 @@ resource "google_compute_firewall" "app_firewall" {
 
   allow {
     protocol = "tcp"
-    ports    = [8080, 80]
+    ports    = [8080, 22]
   }
 
   # Restricting traffic to only come from the load balancer's health check IP range
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["app", "my-vpc-webapp-subnet", "allow-health-check", "load-balancer-backend"]
+  source_ranges = [module.gce-lb-http.external_ip]
+  target_tags   = ["application"]
 }
 
 resource "google_compute_disk" "app_disk" {
@@ -80,11 +80,16 @@ resource "google_compute_disk" "app_disk" {
 # CloudSQL Instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   name             = "webapp-db-instance"
-  database_version = "POSTGRES_13"
+  database_version = "POSTGRES_15"
   project          = "tf-gcp-infra-project"
   region           = "us-east1"
 
-  depends_on = [google_service_networking_connection.private_connection]
+  encryption_key_name = google_kms_crypto_key.cloudsql_crypto_key.id
+
+  depends_on = [
+    google_service_networking_connection.private_connection,
+    google_kms_crypto_key.cloudsql_crypto_key,
+  google_kms_crypto_key_iam_binding.cloudsql_crypto_key_binding]
 
   settings {
     tier              = "db-f1-micro"
@@ -168,49 +173,34 @@ resource "google_project_iam_binding" "pubsub_publisher_binding" {
   ]
 }
 
-resource "google_compute_resource_policy" "daily_backup" {
-  name   = "every-day-4am"
-  region = "us-east1"
-  snapshot_schedule_policy {
-    schedule {
-      daily_schedule {
-        days_in_cycle = 1
-        start_time    = "04:00"
-      }
-    }
-  }
-}
-
 resource "google_compute_region_instance_template" "webapp_template" {
   name        = "webapp-template"
   description = "Instance template for the web application"
 
-  tags = ["webapp", "my-vpc-webapp-subnet", "allow-health-check", "load-balancer-backend", "http-server", "http"]
+  tags = ["application"]
 
   labels = {
     environment = "production"
   }
 
-  machine_type   = "n1-standard-1"
-  can_ip_forward = false
-
-  scheduling {
-    automatic_restart   = true
-    on_host_maintenance = "MIGRATE"
-  }
+  machine_type = "n1-standard-1"
 
   // Create a new boot disk from an image
   disk {
-    source_image = "projects/tf-gcp-infra-project/global/images/packer-1712181702"
+    source_image = "projects/tf-gcp-infra-project/global/images/packer-1713069531"
     auto_delete  = true
     boot         = true
-    // Backup the disk every day
-    resource_policies = [google_compute_resource_policy.daily_backup.id]
+    disk_encryption_key {
+      kms_key_self_link = google_kms_crypto_key.vm_crypto_key.id
+    }
   }
 
   network_interface {
     network    = google_compute_network.my_vpc.self_link
     subnetwork = google_compute_subnetwork.webapp_subnet.self_link
+    access_config {
+
+    }
   }
 
   service_account {
@@ -221,13 +211,18 @@ resource "google_compute_region_instance_template" "webapp_template" {
   metadata_startup_script = <<-EOF
     #!/bin/bash
     # Startup script to configure database connection for web application
-    echo "HOST='${google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address}'" > /opt/webapp/.env
+    echo "HOST='${google_sql_database_instance.cloudsql_instance.private_ip_address}'" > /opt/webapp/.env
     echo "DBPORT=5432" >> /opt/webapp/.env
     echo "DBNAME='${google_sql_database.cloudsql_database.name}'" >> /opt/webapp/.env
     echo "DBUSER='${google_sql_user.cloudsql_user.name}'" >> /opt/webapp/.env
-    echo "DBPASSWORD='${random_password.database_password.result}'" >> /opt/webapp/.env
+    echo "DBPASSWORD='${google_sql_user.cloudsql_user.password}'" >> /opt/webapp/.env
     systemctl start kas.service
     EOF
+
+  depends_on = [
+    google_kms_crypto_key.vm_crypto_key,
+    google_kms_crypto_key_iam_binding.vm_crypto_key_binding
+  ]
 }
 
 resource "google_dns_record_set" "example" {
@@ -282,8 +277,15 @@ resource "random_id" "bucket_prefix" {
 
 resource "google_storage_bucket" "serverless_bucket" {
   name                        = "${random_id.bucket_prefix.hex}-gcf-source"
-  location                    = "US"
+  location                    = "us-east1"
   uniform_bucket_level_access = true
+  encryption {
+    default_kms_key_name = google_kms_crypto_key.bucket_crypto_key.id
+  }
+  depends_on = [
+    google_kms_crypto_key.bucket_crypto_key,
+    google_kms_crypto_key_iam_binding.bucket_crypto_key_binding
+  ]
 }
 
 data "archive_file" "serverless_code" {
@@ -330,11 +332,11 @@ resource "google_cloudfunctions2_function" "cloud_function" {
     available_memory   = "256M"
     timeout_seconds    = 60
     environment_variables = {
-      DB_HOST     = google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address
+      DB_HOST     = google_sql_database_instance.cloudsql_instance.private_ip_address
       DB_PORT     = "5432"
       DB_NAME     = google_sql_database.cloudsql_database.name
       DB_USER     = google_sql_user.cloudsql_user.name
-      DB_PASSWORD = random_password.database_password.result
+      DB_PASSWORD = google_sql_user.cloudsql_user.password
     }
     ingress_settings               = "ALLOW_INTERNAL_ONLY"
     all_traffic_on_latest_revision = true
@@ -370,34 +372,25 @@ resource "google_compute_health_check" "webapp_health_check" {
   name        = "webapp-health-check"
   description = "Health check for the web application"
 
-  timeout_sec         = 15
-  check_interval_sec  = 20
+  timeout_sec         = 1
+  check_interval_sec  = 5
   healthy_threshold   = 4
   unhealthy_threshold = 5
 
   http_health_check {
-    port         = "8080"
+    port         = 8080
     request_path = "/healthz"
-    proxy_header = "NONE"
   }
 }
 
 resource "google_compute_region_instance_group_manager" "my_instance_group_manager" {
   name = "my-instance-group-manager"
 
-  base_instance_name        = "my-instance"
-  region                    = "us-east1"
-  distribution_policy_zones = ["us-east1-c", "us-east1-d"]
+  base_instance_name = "application"
+  region             = "us-east1"
 
   version {
-    instance_template = google_compute_region_instance_template.webapp_template.self_link
-  }
-
-  target_size = 2
-
-  auto_healing_policies {
-    health_check      = google_compute_health_check.webapp_health_check.id
-    initial_delay_sec = 300
+    instance_template = google_compute_region_instance_template.webapp_template.id
   }
 
   named_port {
@@ -406,40 +399,21 @@ resource "google_compute_region_instance_group_manager" "my_instance_group_manag
   }
 }
 
-resource "google_compute_managed_ssl_certificate" "my_ssl_certificate" {
-  name = "my-ssl-certificate"
-  managed {
-    domains = ["kashishdesai.me"]
-  }
-}
-
-# Defining the SSL policy
-resource "google_compute_ssl_policy" "my_ssl_policy" {
-  name    = "my-ssl-policy"
-  profile = "MODERN"
-}
-
 module "gce-lb-http" {
   source  = "terraform-google-modules/lb-http/google"
   version = "~> 10.0"
   name    = "my-load-balancer"
   project = "tf-gcp-infra-project"
 
-  target_tags = [
-    "webapp",
-    "my-vpc-webapp-subnet",
-    "allow-health-check",
-    "load-balancer-backend",
-    "http-server",
-    "http"
-  ]
   firewall_networks = [
-    google_compute_network.my_vpc.name,
+    google_compute_network.my_vpc.id,
   ]
+
+  http_forward = false
 
   backends = {
     default = {
-      protocol    = "HTTPS"
+      protocol    = "HTTP"
       port        = 8080
       port_name   = "http"
       timeout_sec = 30
@@ -469,4 +443,84 @@ module "gce-lb-http" {
 
   ssl                             = true
   managed_ssl_certificate_domains = ["kashishdesai.me."]
+}
+
+resource "random_id" "key_suffix" {
+  byte_length = 8
+}
+
+resource "google_kms_key_ring" "my_key_ring" {
+  name     = "my-key-ring-${random_id.key_suffix.hex}"
+  project  = "tf-gcp-infra-project"
+  location = "us-east1"
+}
+
+resource "google_kms_crypto_key" "vm_crypto_key" {
+  name            = "vm-cmek-key"
+  key_ring        = google_kms_key_ring.my_key_ring.id
+  purpose         = "ENCRYPT_DECRYPT"
+  rotation_period = "2592000s"
+  depends_on      = [google_kms_key_ring.my_key_ring]
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key" "cloudsql_crypto_key" {
+  name            = "cloudsql-cmek-key"
+  key_ring        = google_kms_key_ring.my_key_ring.id
+  purpose         = "ENCRYPT_DECRYPT"
+  rotation_period = "2592000s"
+  depends_on      = [google_kms_key_ring.my_key_ring]
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key" "bucket_crypto_key" {
+  name            = "bucket-cmek-key"
+  key_ring        = google_kms_key_ring.my_key_ring.id
+  purpose         = "ENCRYPT_DECRYPT"
+  rotation_period = "2592000s"
+  depends_on      = [google_kms_key_ring.my_key_ring]
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key_iam_binding" "vm_crypto_key_binding" {
+  crypto_key_id = google_kms_crypto_key.vm_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:service-912452358996@compute-system.iam.gserviceaccount.com",
+  ]
+  depends_on = [google_kms_crypto_key.vm_crypto_key]
+}
+
+resource "google_project_service_identity" "gcp_sa_cloud_sql" {
+  provider = google-beta
+  project  = "tf-gcp-infra-project"
+  service  = "sqladmin.googleapis.com"
+}
+
+resource "google_kms_crypto_key_iam_binding" "cloudsql_crypto_key_binding" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.cloudsql_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:${google_project_service_identity.gcp_sa_cloud_sql.email}"
+  ]
+  depends_on = [google_kms_crypto_key.cloudsql_crypto_key, google_project_service_identity.gcp_sa_cloud_sql]
+}
+
+resource "google_kms_crypto_key_iam_binding" "bucket_crypto_key_binding" {
+  crypto_key_id = google_kms_crypto_key.bucket_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:service-912452358996@gs-project-accounts.iam.gserviceaccount.com"
+  ]
+  depends_on = [google_kms_crypto_key.bucket_crypto_key, google_project_service.servicenetworking]
 }

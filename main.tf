@@ -187,7 +187,7 @@ resource "google_compute_region_instance_template" "webapp_template" {
 
   // Create a new boot disk from an image
   disk {
-    source_image = "projects/tf-gcp-infra-project/global/images/packer-1713069531"
+    source_image = "projects/tf-gcp-infra-project/global/images/packer-1713151490"
     auto_delete  = true
     boot         = true
     disk_encryption_key {
